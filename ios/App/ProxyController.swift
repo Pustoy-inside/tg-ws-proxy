@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Network
 
 /// Runs the proxy inside the app and keeps the app alive in the background.
 @MainActor
@@ -26,6 +27,15 @@ final class ProxyController: ObservableObject {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
 
+    @Published private(set) var network = "other"
+    @Published private(set) var testing = false
+    @Published private(set) var testProgress = ""
+    @Published private(set) var reports: [String: StrategyTestReport] = [:]
+    private let pathMonitor = NWPathMonitor()
+    private var lastAutoTest: Date?
+    private var emptyWindow: [Date] = []
+    private var lastEmpty = 0
+
     private var server: ProxyServer?
     private var dpiServer: DPIProxy?
     private let keepAlive = KeepAlive()
@@ -41,9 +51,19 @@ final class ProxyController: ObservableObject {
         keepAlive.onAuthorizationProblem = { [weak self] msg in
             Task { @MainActor in self?.keepAliveProblem = msg }
         }
-        poll = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.proxy = stats.snapshot() }
+        if let data = d.data(forKey: "strategyReports"),
+           let r = try? JSONDecoder().decode([String: StrategyTestReport].self, from: data) {
+            reports = r
         }
+        poll = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tick() }
+        }
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let kind = path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet)
+                ? "wifi" : path.usesInterfaceType(.cellular) ? "cellular" : "other"
+            Task { @MainActor in self?.networkChanged(kind) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "path"))
         if autoStart && d.bool(forKey: "wasRunning") { start() }
         if autoStart && dpi.enabled { startDPI() }
     }
@@ -106,7 +126,7 @@ final class ProxyController: ObservableObject {
             dpiError = "Порт обхода совпадает с портом прокси Telegram"
             return
         }
-        let s = DPIProxy(settings: dpi)
+        let s = DPIProxy(settings: dpi, strategy: dpi.effectiveStrategy(network: network))
         do {
             try s.start()
         } catch {
@@ -117,6 +137,7 @@ final class ProxyController: ObservableObject {
         if !running { keepAlive.start(keepAliveMode) }
         dpiRunning = true
         if !dpi.enabled { dpi.enabled = true }
+        autoTestIfNeeded()
     }
 
     func stopDPI() {
@@ -134,6 +155,80 @@ final class ProxyController: ObservableObject {
         dpiServer = nil
         dpiRunning = false
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startDPI() }
+    }
+
+    // MARK: Auto-select
+
+    var networkTitle: String {
+        switch network {
+        case "wifi": return "Wi-Fi"
+        case "cellular": return "мобильный интернет"
+        default: return "другая сеть"
+        }
+    }
+
+    var currentStrategy: DesyncStrategy { dpi.effectiveStrategy(network: network) }
+
+    private func tick() {
+        proxy = stats.snapshot()
+        // Several "no answer after the bypass" in two minutes: the strategy
+        // probably stopped working here; test again (at most every 10 min).
+        if proxy.dpiEmpty > lastEmpty {
+            for _ in 0..<(proxy.dpiEmpty - lastEmpty) { emptyWindow.append(Date()) }
+            lastEmpty = proxy.dpiEmpty
+            emptyWindow.removeAll { Date().timeIntervalSince($0) > 120 }
+            if emptyWindow.count >= 3, dpi.autoSelect, dpiRunning, !testing,
+               Date().timeIntervalSince(lastAutoTest ?? .distantPast) > 600 {
+                plog.info("Auto-select: bypass failures, testing strategies again")
+                emptyWindow.removeAll()
+                Task { await runTest(auto: true) }
+            }
+        }
+    }
+
+    private func networkChanged(_ kind: String) {
+        guard kind != network else { return }
+        network = kind
+        plog.info("Network: \(kind)")
+        if let s = dpiServer {
+            s.strategy = currentStrategy
+            plog.info("Strategy for \(kind): \(s.strategy.rawValue)")
+        }
+        autoTestIfNeeded()
+    }
+
+    private func autoTestIfNeeded() {
+        guard dpi.autoSelect, dpiRunning, !testing, network != "other",
+              dpi.bestByNetwork[network] == nil,
+              Date().timeIntervalSince(lastAutoTest ?? .distantPast) > 120 else { return }
+        Task { await runTest(auto: true) }
+    }
+
+    /// Tests every strategy on the current network and keeps the best one.
+    func runTest(auto: Bool = false) async {
+        guard !testing else { return }
+        if dpi.port == StrategyTester.testPort || settings.port == StrategyTester.testPort {
+            dpiError = "Порт \(StrategyTester.testPort) нужен для проверки, выбери другой порт"
+            return
+        }
+        testing = true
+        lastAutoTest = Date()
+        let net = network
+        let tester = StrategyTester()
+        tester.onProgress = { [weak self] t in Task { @MainActor in self?.testProgress = t } }
+        let report = await tester.run(network: net)
+        reports[net] = report
+        UserDefaults.standard.set((try? JSONEncoder().encode(reports)) ?? Data(), forKey: "strategyReports")
+        if let best = report.best {
+            dpi.bestByNetwork[net] = best
+            if net == network, let s = dpiServer, dpi.autoSelect { s.strategy = best }
+            testProgress = "Лучший способ: \(best.title)"
+            plog.info("Auto-select: best for \(net) is \(best.rawValue)")
+        } else {
+            testProgress = "Ни один способ не прошёл проверку"
+            plog.warn("Auto-select: no strategy passed on \(net)")
+        }
+        testing = false
     }
 
     func logText() -> String {

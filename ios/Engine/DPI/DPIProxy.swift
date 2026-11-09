@@ -10,7 +10,19 @@ final class DPIProxy {
     private let queue = DispatchQueue(label: "dpi.listener")
     private var stopped = false
 
-    init(settings: DPISettings) { self.settings = settings }
+    private let strategyLock = NSLock()
+    private var _strategy: DesyncStrategy
+
+    /// Can change while running (auto-select on a network change).
+    var strategy: DesyncStrategy {
+        get { strategyLock.lock(); defer { strategyLock.unlock() }; return _strategy }
+        set { strategyLock.lock(); _strategy = newValue; strategyLock.unlock() }
+    }
+
+    init(settings: DPISettings, strategy: DesyncStrategy? = nil) {
+        self.settings = settings
+        _strategy = strategy ?? settings.strategy
+    }
 
     func start() throws {
         let tcp = NWProtocolTCP.Options()
@@ -46,7 +58,7 @@ final class DPIProxy {
         }
         listener = l
         l.start(queue: queue)
-        plog.info("DPI bypass: HTTP proxy on 127.0.0.1:\(settings.port), strategy \(settings.strategy.rawValue), \(settings.allDomains.count) domains\(settings.applyToAll ? " (all hosts)" : "")")
+        plog.info("DPI bypass: HTTP proxy on 127.0.0.1:\(settings.port), strategy \(strategy.rawValue), \(settings.allDomains.count) domains\(settings.applyToAll ? " (all hosts)" : "")")
     }
 
     func stop() {
@@ -197,8 +209,9 @@ final class DPIProxy {
                 }
             }
             if bypass {
-                plog.info("[\(label)] \(host):\(port) -> \(settings.strategy.title)")
-                try await Desync.send(first, to: server, strategy: settings.strategy, label: label)
+                let st = strategy
+                plog.info("[\(label)] \(host):\(port) -> \(st.rawValue)")
+                try await Desync.send(first, to: server, strategy: st, label: label)
             } else {
                 plog.debug("[\(label)] \(host):\(port) direct")
                 try await server.write(Data(first))
@@ -237,7 +250,7 @@ final class DPIProxy {
             defer { server.close() }
             let payload = [UInt8](newHead + rest)
             if bypass {
-                try await Desync.send(payload, to: server, strategy: settings.strategy, label: label)
+                try await Desync.send(payload, to: server, strategy: strategy, label: label)
             } else {
                 try await server.write(Data(payload))
             }

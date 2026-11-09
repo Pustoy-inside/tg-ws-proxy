@@ -31,6 +31,9 @@ struct DPISettings: Codable, Equatable {
     var strategy: DesyncStrategy = .tlsrecSplit
     var extraDomains: [String] = []
     var applyToAll = false
+    /// Use the strategy the test picked for the current network type.
+    var autoSelect = true
+    var bestByNetwork: [String: DesyncStrategy] = [:]
     // Cellular (APN profile)
     var apn = ""
     var apnUser = ""
@@ -46,9 +49,15 @@ struct DPISettings: Codable, Equatable {
         strategy = (try? c.decodeIfPresent(DesyncStrategy.self, forKey: .strategy)) ?? d.strategy
         extraDomains = try c.decodeIfPresent([String].self, forKey: .extraDomains) ?? d.extraDomains
         applyToAll = try c.decodeIfPresent(Bool.self, forKey: .applyToAll) ?? d.applyToAll
+        autoSelect = try c.decodeIfPresent(Bool.self, forKey: .autoSelect) ?? d.autoSelect
+        bestByNetwork = (try? c.decodeIfPresent([String: DesyncStrategy].self, forKey: .bestByNetwork)) ?? [:]
         apn = try c.decodeIfPresent(String.self, forKey: .apn) ?? d.apn
         apnUser = try c.decodeIfPresent(String.self, forKey: .apnUser) ?? d.apnUser
         apnPassword = try c.decodeIfPresent(String.self, forKey: .apnPassword) ?? d.apnPassword
+    }
+
+    func effectiveStrategy(network: String) -> DesyncStrategy {
+        autoSelect ? (bestByNetwork[network] ?? strategy) : strategy
     }
 
     var pacURL: String { "http://127.0.0.1:\(port)/proxy.pac" }

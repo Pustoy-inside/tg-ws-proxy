@@ -80,6 +80,9 @@ struct ContentView: View {
                     }
                     NavigationLink("Настройка обхода") { DPISettingsView() }
                     if tunnel.dpiRunning {
+                        row("Способ", tunnel.testing ? "проверка…" : tunnel.currentStrategy.title + (tunnel.dpi.autoSelect ? " (авто)" : ""))
+                    }
+                    if tunnel.dpiRunning {
                         row("Соединений через обход", "\(tunnel.proxy.dpiConnections) (сейчас \(tunnel.proxy.dpiActive))")
                         if tunnel.proxy.dpiEmpty > 0 {
                             row("Без ответа после обхода", "\(tunnel.proxy.dpiEmpty)")
@@ -270,12 +273,49 @@ struct DPISettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Способ", selection: $draft.strategy) {
+                Toggle("Автовыбор лучшего способа", isOn: $draft.autoSelect)
+                Picker(draft.autoSelect ? "Способ, пока нет проверки" : "Способ", selection: $draft.strategy) {
                     ForEach(DesyncStrategy.allCases) { Text($0.title).tag($0) }
                 }
                 Toggle("Для всех сайтов, не только из списка", isOn: $draft.applyToAll)
             } header: { Text("Стратегия") } footer: {
-                Text("Если YouTube или Discord не грузятся, попробуй другой способ: у разных провайдеров работают разные. В журнале строки «no answer after the bypass» значат, что способ не сработал.")
+                Text("С автовыбором приложение само проверяет все способы — отдельно на Wi-Fi и на мобильном интернете — и включает лучший. Проверка повторяется, если способ перестал работать.")
+            }
+
+            Section {
+                HStack {
+                    Text("Сеть")
+                    Spacer()
+                    Text(tunnel.networkTitle).foregroundColor(.secondary)
+                }
+                HStack {
+                    Text("Сейчас работает")
+                    Spacer()
+                    Text(tunnel.currentStrategy.title).foregroundColor(.secondary).multilineTextAlignment(.trailing)
+                }
+                Button(tunnel.testing ? "Идёт проверка…" : "Проверить все способы") {
+                    Task { await tunnel.runTest() }
+                }
+                .disabled(tunnel.testing)
+                if !tunnel.testProgress.isEmpty {
+                    Text(tunnel.testProgress).font(.footnote).foregroundColor(.secondary)
+                }
+                if let report = tunnel.reports[tunnel.network] {
+                    ForEach(report.results.sorted { $0.score > $1.score }) { r in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(r.strategy == report.best ? "★" : " ").frame(width: 14)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(r.strategy.title).font(.subheadline)
+                                Text("\(r.passed) из \(r.total) · 16–20 КБ: \(r.freezeOK ? "ок" : "обрыв") · \(String(format: "%.0f", r.seconds)) с")
+                                    .font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    Text("Проверено \(report.date.formatted(date: .abbreviated, time: .shortened))")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            } header: { Text("Проверка способов") } footer: {
+                Text("Как «Run Tests» в Windows-версии: Discord, YouTube, Google и Cloudflare по TLS 1.2 и 1.3, плюс проверка обрыва на 16–20 КБ. Занимает около минуты. «Без обхода» показывает, нужен ли обход вообще.")
             }
 
             Section {
@@ -361,6 +401,7 @@ struct DPISettingsView: View {
             .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
         draft.apn = draft.apn.trimmingCharacters(in: .whitespaces)
         draft.enabled = tunnel.dpi.enabled
+        draft.bestByNetwork = tunnel.dpi.bestByNetwork
         tunnel.dpi = draft
         tunnel.applyDPI()
     }
