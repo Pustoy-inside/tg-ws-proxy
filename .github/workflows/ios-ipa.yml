@@ -49,13 +49,15 @@ jobs:
             CURRENT_PROJECT_VERSION=${{ steps.v.outputs.n }} \
             MARKETING_VERSION=1.${{ steps.v.outputs.n }} \
             "SWIFT_ACTIVE_COMPILATION_CONDITIONS=\$(inherited) ${{ steps.v.outputs.flags }}" \
-            build 2>&1 | tee build.log | grep -E "error:|warning: .*(Swift|swift)|BUILD (SUCCEEDED|FAILED)" || true
-          test -d build/Release-iphoneos/TGWSProxy.app
+            build > build.log 2>&1 || { grep -E "error:" build.log | head -50; exit 1; }
+          grep -E "BUILD (SUCCEEDED|FAILED)" build.log || true
+          test -f build/Release-iphoneos/TGWSProxy.app/TGWSProxy
 
       - name: Package IPA (ad-hoc signed)
         run: |
           rm -rf Payload && mkdir Payload
           cp -R build/Release-iphoneos/TGWSProxy.app Payload/
+          test -f Payload/TGWSProxy.app/TGWSProxy
           codesign -f -s - Payload/TGWSProxy.app
           zip -qry "TGWSProxy-${{ steps.v.outputs.n }}.ipa" Payload
           ls -la *.ipa

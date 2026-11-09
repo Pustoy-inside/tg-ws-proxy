@@ -10,7 +10,7 @@ final class PosixSocket {
     private let queue = DispatchQueue(label: "psock")
     private let lock = NSLock()
     private var closed = false
-    private var sources: [DispatchSourceProtocol] = []
+    private var sources: [Int: DispatchSourceProtocol] = [:]
 
     private init(fd: Int32, family: Int32) {
         self.fd = fd
@@ -100,35 +100,58 @@ final class PosixSocket {
 
     private final class Waiter {
         var done = false
+        let id: Int
+        let continuation: CheckedContinuation<Bool, Never>
+        var source: DispatchSourceProtocol?
+        init(id: Int, continuation: CheckedContinuation<Bool, Never>) {
+            self.id = id
+            self.continuation = continuation
+        }
+    }
+
+    private var nextWaiterID = 0
+
+    /// Runs on `queue`.
+    private func finish(_ w: Waiter, _ ok: Bool) {
+        if w.done { return }
+        w.done = true
+        w.source?.cancel()
+        lock.lock()
+        sources.removeValue(forKey: w.id)
+        lock.unlock()
+        w.continuation.resume(returning: ok)
     }
 
     private func wait(read: Bool, timeout: TimeInterval?) async -> Bool {
-        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-            queue.async { [self] in
-                if isClosed { c.resume(returning: false); return }
-                let w = Waiter()
-                let src: DispatchSourceProtocol = read
-                    ? DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
-                    : DispatchSource.makeWriteSource(fileDescriptor: fd, queue: queue)
-                let finish: (Bool) -> Void = { [weak self] ok in
-                    guard !w.done else { return }
-                    w.done = true
-                    src.cancel()
-                    if let self {
-                        self.lock.lock()
-                        self.sources.removeAll { $0 === src }
-                        self.lock.unlock()
-                    }
-                    c.resume(returning: ok)
-                }
-                src.setEventHandler { finish(true) }
-                src.setCancelHandler { finish(false) }
-                lock.lock(); sources.append(src); lock.unlock()
-                src.resume()
-                if let timeout {
-                    queue.asyncAfter(deadline: .now() + timeout) { finish(false) }
-                }
+        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) -> Void in
+            queue.async {
+                self.startWaiting(read: read, timeout: timeout, c)
             }
+        }
+    }
+
+    private func startWaiting(read: Bool, timeout: TimeInterval?, _ c: CheckedContinuation<Bool, Never>) {
+        if isClosed {
+            c.resume(returning: false)
+            return
+        }
+        nextWaiterID += 1
+        let w = Waiter(id: nextWaiterID, continuation: c)
+        let src: DispatchSourceProtocol
+        if read {
+            src = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        } else {
+            src = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: queue)
+        }
+        w.source = src
+        src.setEventHandler { [weak self] in self?.finish(w, true) }
+        src.setCancelHandler { [weak self] in self?.finish(w, false) }
+        lock.lock()
+        sources[w.id] = src
+        lock.unlock()
+        src.resume()
+        if let timeout {
+            queue.asyncAfter(deadline: .now() + timeout) { [weak self] in self?.finish(w, false) }
         }
     }
 
@@ -214,8 +237,8 @@ final class PosixSocket {
         lock.lock()
         if closed { lock.unlock(); return }
         closed = true
-        let srcs = sources
-        sources = []
+        let srcs = Array(sources.values)
+        sources = [:]
         lock.unlock()
         shutdown(fd, SHUT_RDWR)
         queue.async { [fd] in
