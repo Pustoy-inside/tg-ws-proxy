@@ -71,9 +71,14 @@ final class CFBalancer {
     }
 
     /// Refreshes the list hourly, like start_cfproxy_domain_refresh.
+    private var refreshing = false
+
     func startRefresh() {
-        lock.lock(); let user = userDomains; lock.unlock()
-        if user { return }
+        lock.lock()
+        let skip = userDomains || refreshing
+        refreshing = true
+        lock.unlock()
+        if skip { return }
         Task.detached { [weak self] in
             while let self {
                 await self.refreshOnce()

@@ -48,13 +48,11 @@ jobs:
             build 2>&1 | tee build.log | grep -E "error:|warning: .*(Swift|swift)|BUILD (SUCCEEDED|FAILED)" || true
           test -d build/Release-iphoneos/TGWSProxy.app
 
-      - name: Package IPA (ad-hoc signed with entitlements)
+      - name: Package IPA (ad-hoc signed)
         run: |
           rm -rf Payload && mkdir Payload
           cp -R build/Release-iphoneos/TGWSProxy.app Payload/
-          codesign -f -s - --entitlements Tunnel/Tunnel.entitlements Payload/TGWSProxy.app/PlugIns/Tunnel.appex
-          codesign -f -s - --entitlements App/App.entitlements Payload/TGWSProxy.app
-          codesign -d --entitlements - Payload/TGWSProxy.app/PlugIns/Tunnel.appex
+          codesign -f -s - Payload/TGWSProxy.app
           zip -qry "TGWSProxy-${{ steps.v.outputs.n }}.ipa" Payload
           ls -la *.ipa
 

@@ -1,8 +1,6 @@
 import Foundation
 
-/// Settings the app hands to the VPN module through the tunnel's
-/// providerConfiguration, so no App Group is needed (sideloading tools
-/// rewrite group IDs).
+/// Proxy settings, stored in UserDefaults.
 struct ProxySettings: Codable, Equatable {
     var port: Int = 1443
     /// 32 hex characters.
@@ -14,8 +12,6 @@ struct ProxySettings: Codable, Equatable {
     var cfProxyDomains: [String] = []
     var cfWorkerDomains: [String] = []
     var verboseLog: Bool = false
-
-    static let providerKey = "settings"
 
     static func randomSecret() -> String {
         (0..<16).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
@@ -48,12 +44,6 @@ struct ProxySettings: Codable, Equatable {
         guard let data else { return nil }
         return try? JSONDecoder().decode(ProxySettings.self, from: data)
     }
-}
-
-/// Messages between the app and the VPN module.
-enum ProviderMessage: String {
-    case status
-    case log
 }
 
 struct ProxyStatus: Codable {

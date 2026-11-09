@@ -1,10 +1,9 @@
 import SwiftUI
 import UIKit
-import NetworkExtension
 
 @main
 struct TGWSProxyApp: App {
-    @StateObject private var tunnel = TunnelManager()
+    @StateObject private var tunnel = ProxyController()
     var body: some Scene {
         WindowGroup {
             ContentView().environmentObject(tunnel)
@@ -19,7 +18,7 @@ enum AppInfo {
 }
 
 struct ContentView: View {
-    @EnvironmentObject var tunnel: TunnelManager
+    @EnvironmentObject var tunnel: ProxyController
     @State private var copied = false
 
     var body: some View {
@@ -27,8 +26,8 @@ struct ContentView: View {
             List {
                 Section {
                     Toggle(isOn: Binding(
-                        get: { tunnel.isOn },
-                        set: { on in Task { if on { await tunnel.start() } else { await tunnel.stop() } } }
+                        get: { tunnel.running },
+                        set: { on in if on { tunnel.start() } else { tunnel.stop() } }
                     )) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Прокси для Telegram").font(.headline)
@@ -38,11 +37,14 @@ struct ContentView: View {
                     if let e = tunnel.lastError {
                         Text(e).font(.footnote).foregroundColor(.red)
                     }
-                    if let e = tunnel.proxy.listenError, tunnel.status == .connected {
-                        Text("Порт занят или недоступен: \(e)").font(.footnote).foregroundColor(.red)
+                    if let e = tunnel.keepAliveProblem {
+                        Text(e).font(.footnote).foregroundColor(.orange)
+                    }
+                    Picker("Работа в фоне", selection: $tunnel.keepAliveMode) {
+                        ForEach(KeepAliveMode.allCases) { Text($0.title).tag($0) }
                     }
                 } footer: {
-                    Text("Включается как VPN, но трафик телефона через него не идёт: модуль только держит прокси запущенным на 127.0.0.1.")
+                    Text("Прокси работает внутри приложения. Чтобы iOS не усыпляла его, пока открыт Telegram, приложение держит включённой геолокацию (грубую, раз в несколько километров) или играет тишину. Не закрывай приложение смахиванием из списка недавних.")
                 }
 
                 Section {
@@ -63,7 +65,7 @@ struct ContentView: View {
                     Text("Один раз добавь прокси в Telegram и включи его там. Вручную: тип MTProto, сервер 127.0.0.1, порт \(tunnel.settings.port), секрет dd\(tunnel.settings.secret).")
                 }
 
-                if tunnel.status == .connected {
+                if tunnel.running {
                     Section("Сейчас") {
                         row("Активных соединений", "\(tunnel.proxy.connectionsActive)")
                         row("Всего соединений", "\(tunnel.proxy.connectionsTotal)")
@@ -100,7 +102,7 @@ func humanBytesApp(_ n: Int64) -> String {
 }
 
 struct SettingsView: View {
-    @EnvironmentObject var tunnel: TunnelManager
+    @EnvironmentObject var tunnel: ProxyController
     @State private var draft = ProxySettings()
     @State private var dcText = ""
     @State private var cfText = ""
@@ -150,10 +152,10 @@ struct SettingsView: View {
             }
 
             Section {
-                Toggle("Включать снова автоматически", isOn: $tunnel.autoReconnect)
+                Toggle("Включать при запуске приложения", isOn: $tunnel.autoStart)
                 Toggle("Подробный журнал", isOn: $draft.verboseLog)
             } footer: {
-                Text("Если iOS выгрузит модуль, он включится сам.")
+                Text("Если iOS закроет приложение, прокси включится сам при следующем открытии.")
             }
 
             Section {
@@ -191,12 +193,12 @@ struct SettingsView: View {
         draft.cfWorkerDomains = lines(workerText)
         if let p = Int(portText), (1...65535).contains(p) { draft.port = p }
         tunnel.settings = draft
-        Task { await tunnel.apply() }
+        tunnel.apply()
     }
 }
 
 struct LogView: View {
-    @EnvironmentObject var tunnel: TunnelManager
+    @EnvironmentObject var tunnel: ProxyController
     @State private var text = ""
 
     var body: some View {
@@ -210,10 +212,10 @@ struct LogView: View {
         .navigationTitle("Журнал")
         .toolbar {
             ToolbarItemGroup(placement: .navigationBarTrailing) {
-                Button { Task { text = await tunnel.fetchLog() } } label: { Image(systemName: "arrow.clockwise") }
+                Button { text = tunnel.logText() } label: { Image(systemName: "arrow.clockwise") }
                 ShareLink(item: text) { Image(systemName: "square.and.arrow.up") }
             }
         }
-        .task { text = await tunnel.fetchLog() }
+        .onAppear { text = tunnel.logText() }
     }
 }
