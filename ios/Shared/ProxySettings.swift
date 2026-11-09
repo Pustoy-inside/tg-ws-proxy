@@ -59,4 +59,13 @@ struct ProxyStatus: Codable {
     var bytesDown: Int64 = 0
     var poolHits: Int = 0
     var poolMisses: Int = 0
+    // DPI bypass
+    var dpiListening: Bool = false
+    var dpiListenError: String?
+    var dpiConnections: Int = 0
+    var dpiActive: Int = 0
+    var dpiErrors: Int = 0
+    var dpiEmpty: Int = 0
+    var dpiBytesUp: Int64 = 0
+    var dpiBytesDown: Int64 = 0
 }

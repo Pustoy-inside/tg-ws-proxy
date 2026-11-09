@@ -65,6 +65,34 @@ struct ContentView: View {
                     Text("Один раз добавь прокси в Telegram и включи его там. Вручную: тип MTProto, сервер 127.0.0.1, порт \(tunnel.settings.port), секрет dd\(tunnel.settings.secret).")
                 }
 
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { tunnel.dpiRunning },
+                        set: { on in if on { tunnel.startDPI() } else { tunnel.stopDPI() } }
+                    )) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Обход для YouTube и Discord").font(.headline)
+                            Text(tunnel.dpiStatusText).font(.subheadline).foregroundColor(.secondary)
+                        }
+                    }
+                    if let e = tunnel.dpiError {
+                        Text(e).font(.footnote).foregroundColor(.red)
+                    }
+                    NavigationLink("Настройка обхода") { DPISettingsView() }
+                    if tunnel.dpiRunning {
+                        row("Соединений через обход", "\(tunnel.proxy.dpiConnections) (сейчас \(tunnel.proxy.dpiActive))")
+                        if tunnel.proxy.dpiEmpty > 0 {
+                            row("Без ответа после обхода", "\(tunnel.proxy.dpiEmpty)")
+                        }
+                        if tunnel.proxy.dpiErrors > 0 {
+                            row("Ошибки", "\(tunnel.proxy.dpiErrors)")
+                        }
+                        row("Трафик обхода", "↑\(humanBytesApp(tunnel.proxy.dpiBytesUp)) ↓\(humanBytesApp(tunnel.proxy.dpiBytesDown))")
+                    }
+                } footer: {
+                    Text(dpiFooter)
+                }
+
                 if tunnel.running {
                     Section("Сейчас") {
                         row("Активных соединений", "\(tunnel.proxy.connectionsActive)")
@@ -90,6 +118,14 @@ struct ContentView: View {
             .navigationTitle("TG WS Proxy")
         }
         .navigationViewStyle(.stack)
+    }
+
+    private var dpiFooter: String {
+        #if CELLULAR
+        return "Работает на Wi-Fi через настройку прокси сети и на мобильном интернете через профиль. Голос в Discord не поддерживается. Подробности — в «Настройке обхода»."
+        #else
+        return "Работает на Wi-Fi: один раз пропиши адрес PAC в настройках сети (см. «Настройка обхода»). Голос в Discord не поддерживается."
+        #endif
     }
 
     private func row(_ title: String, _ value: String) -> some View {
@@ -217,5 +253,115 @@ struct LogView: View {
             }
         }
         .onAppear { text = tunnel.logText() }
+    }
+}
+
+struct DPISettingsView: View {
+    @EnvironmentObject var tunnel: ProxyController
+    @State private var draft = DPISettings()
+    @State private var portText = ""
+    @State private var domainsText = ""
+    @State private var loaded = false
+    @State private var copied = false
+    #if CELLULAR
+    @State private var operatorName = ""
+    #endif
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("Способ", selection: $draft.strategy) {
+                    ForEach(DesyncStrategy.allCases) { Text($0.title).tag($0) }
+                }
+                Toggle("Для всех сайтов, не только из списка", isOn: $draft.applyToAll)
+            } header: { Text("Стратегия") } footer: {
+                Text("Если YouTube или Discord не грузятся, попробуй другой способ: у разных провайдеров работают разные. В журнале строки «no answer after the bypass» значат, что способ не сработал.")
+            }
+
+            Section {
+                Text(draft.pacURL).font(.system(.footnote, design: .monospaced)).textSelection(.enabled)
+                Button(copied ? "Адрес скопирован" : "Скопировать адрес PAC") {
+                    UIPasteboard.general.string = draft.pacURL
+                    copied = true
+                }
+                Button("Открыть настройки iOS") {
+                    if let u = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(u) }
+                }
+            } header: { Text("Wi-Fi") } footer: {
+                Text("Настройки → Wi-Fi → (i) у своей сети → Настройка прокси → Автоматически → вставь адрес. Делается один раз для каждой сети. Если приложение выключено, сайты откроются напрямую, интернет не пропадёт.")
+            }
+
+            #if CELLULAR
+            Section {
+                Picker("Оператор", selection: $operatorName) {
+                    Text("Свой APN").tag("")
+                    ForEach(CellularProfile.operators) { Text($0.name).tag($0.name) }
+                }
+                .onChange(of: operatorName) { name in
+                    if let o = CellularProfile.operators.first(where: { $0.name == name }) {
+                        draft.apn = o.apn; draft.apnUser = o.user; draft.apnPassword = o.password
+                    }
+                }
+                TextField("APN, например internet.mts.ru", text: $draft.apn)
+                    .autocapitalization(.none).disableAutocorrection(true)
+                TextField("Имя пользователя (если нужно)", text: $draft.apnUser)
+                    .autocapitalization(.none).disableAutocorrection(true)
+                TextField("Пароль (если нужно)", text: $draft.apnPassword)
+                    .autocapitalization(.none).disableAutocorrection(true)
+                Button("Установить профиль мобильного интернета") {
+                    save()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        if let u = URL(string: "http://127.0.0.1:\(draft.port)/cellular.mobileconfig") {
+                            UIApplication.shared.open(u)
+                        }
+                    }
+                }
+                .disabled(draft.apn.trimmingCharacters(in: .whitespaces).isEmpty || !tunnel.dpiRunning)
+            } header: { Text("Мобильный интернет") } footer: {
+                Text("Включи обход, выбери оператора и нажми кнопку: Safari скачает профиль. Затем Настройки → Профиль загружен → Установить. Пока приложение не запущено, сайты на мобильном интернете не откроются — удали профиль в Настройки → Основные → VPN и управление устройством, если перестанешь пользоваться. Проверь APN в Настройки → Сотовая связь → Сотовая сеть передачи данных.")
+            }
+            #endif
+
+            Section {
+                HStack {
+                    Text("Порт")
+                    Spacer()
+                    TextField("8881", text: $portText).keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing).frame(width: 90)
+                }
+                VStack(alignment: .leading) {
+                    Text("Свои домены (по строке)").font(.footnote).foregroundColor(.secondary)
+                    TextEditor(text: $domainsText).font(.system(.footnote, design: .monospaced)).frame(minHeight: 70)
+                }
+            } header: { Text("Дополнительно") } footer: {
+                Text("Встроенный список — \(DPIDomains.defaults.count) доменов YouTube, Discord и Cloudflare из zapret-discord-youtube. После смены порта поменяй адрес PAC в настройках Wi-Fi.")
+            }
+
+            Section {
+                Button("Сохранить") { save() }
+            }
+        }
+        .navigationTitle("Настройка обхода")
+        .onAppear {
+            if !loaded {
+                draft = tunnel.dpi
+                portText = String(draft.port)
+                domainsText = draft.extraDomains.joined(separator: "\n")
+                #if CELLULAR
+                operatorName = CellularProfile.operators.first(where: { $0.apn == draft.apn })?.name ?? ""
+                #endif
+                loaded = true
+            }
+        }
+    }
+
+    private func save() {
+        if let p = Int(portText), (1...65535).contains(p) { draft.port = p }
+        draft.extraDomains = domainsText.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }
+        draft.apn = draft.apn.trimmingCharacters(in: .whitespaces)
+        draft.enabled = tunnel.dpi.enabled
+        tunnel.dpi = draft
+        tunnel.applyDPI()
     }
 }

@@ -14,14 +14,20 @@ final class ProxyController: ObservableObject {
     @Published var keepAliveMode: KeepAliveMode {
         didSet {
             UserDefaults.standard.set(keepAliveMode.rawValue, forKey: "keepAlive")
-            if running { keepAlive.start(keepAliveMode) }
+            if running || dpiRunning { keepAlive.start(keepAliveMode) }
         }
+    }
+    @Published private(set) var dpiRunning = false
+    @Published var dpiError: String?
+    @Published var dpi: DPISettings {
+        didSet { UserDefaults.standard.set((try? JSONEncoder().encode(dpi)) ?? Data(), forKey: "dpi") }
     }
     @Published var autoStart: Bool {
         didSet { UserDefaults.standard.set(autoStart, forKey: "autoStart") }
     }
 
     private var server: ProxyServer?
+    private var dpiServer: DPIProxy?
     private let keepAlive = KeepAlive()
     private var poll: Timer?
 
@@ -30,6 +36,7 @@ final class ProxyController: ObservableObject {
         settings = ProxySettings.decode(d.data(forKey: "settings")) ?? ProxySettings()
         keepAliveMode = KeepAliveMode(rawValue: d.string(forKey: "keepAlive") ?? "") ?? .location
         autoStart = d.object(forKey: "autoStart") as? Bool ?? true
+        dpi = (d.data(forKey: "dpi")).flatMap { try? JSONDecoder().decode(DPISettings.self, from: $0) } ?? DPISettings()
         d.set(settings.encoded(), forKey: "settings")
         keepAlive.onAuthorizationProblem = { [weak self] msg in
             Task { @MainActor in self?.keepAliveProblem = msg }
@@ -38,6 +45,7 @@ final class ProxyController: ObservableObject {
             Task { @MainActor in self?.proxy = stats.snapshot() }
         }
         if autoStart && d.bool(forKey: "wasRunning") { start() }
+        if autoStart && dpi.enabled { startDPI() }
     }
 
     var statusText: String {
@@ -61,7 +69,7 @@ final class ProxyController: ObservableObject {
             return
         }
         server = s
-        keepAlive.start(keepAliveMode)
+        if !dpiRunning { keepAlive.start(keepAliveMode) }
         running = true
         UserDefaults.standard.set(true, forKey: "wasRunning")
     }
@@ -69,9 +77,8 @@ final class ProxyController: ObservableObject {
     func stop() {
         server?.stop()
         server = nil
-        keepAlive.stop()
         running = false
-        keepAliveProblem = nil
+        if !dpiRunning { keepAlive.stop(); keepAliveProblem = nil }
         UserDefaults.standard.set(false, forKey: "wasRunning")
         plog.info("Proxy stopped")
     }
@@ -82,6 +89,51 @@ final class ProxyController: ObservableObject {
         stop()
         // Let the listener release the port.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.start() }
+    }
+
+    // MARK: DPI bypass
+
+    var dpiStatusText: String {
+        if !dpiRunning { return "Выключен" }
+        if proxy.dpiListening { return "Работает на 127.0.0.1:\(dpi.port)" }
+        if let e = proxy.dpiListenError { return "Ошибка порта: \(e)" }
+        return "Запускается…"
+    }
+
+    func startDPI() {
+        dpiError = nil
+        if dpi.port == settings.port {
+            dpiError = "Порт обхода совпадает с портом прокси Telegram"
+            return
+        }
+        let s = DPIProxy(settings: dpi)
+        do {
+            try s.start()
+        } catch {
+            dpiError = "Не удалось запустить обход: \(error.localizedDescription)"
+            return
+        }
+        dpiServer = s
+        if !running { keepAlive.start(keepAliveMode) }
+        dpiRunning = true
+        if !dpi.enabled { dpi.enabled = true }
+    }
+
+    func stopDPI() {
+        dpiServer?.stop()
+        dpiServer = nil
+        dpiRunning = false
+        if dpi.enabled { dpi.enabled = false }
+        if !running { keepAlive.stop(); keepAliveProblem = nil }
+        plog.info("DPI bypass stopped")
+    }
+
+    func applyDPI() {
+        guard dpiRunning else { return }
+        dpiServer?.stop()
+        dpiServer = nil
+        dpiRunning = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.startDPI() }
     }
 
     func logText() -> String {
