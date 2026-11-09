@@ -1,0 +1,98 @@
+name: iOS IPA
+
+on:
+  push:
+    branches: [main]
+    paths: ["ios/build.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-ipa
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read build number
+        id: v
+        run: |
+          N=$(python3 -c 'import json;print(json.load(open("build.json"))["build"])')
+          echo "n=$N" >> "$GITHUB_OUTPUT"
+          echo "Build $N"
+
+      - name: Generate project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Build
+        run: |
+          xcodebuild -version
+          set -o pipefail
+          xcodebuild -project TGWSProxy.xcodeproj -target TGWSProxy \
+            -sdk iphoneos -configuration Release \
+            SYMROOT="$PWD/build" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CURRENT_PROJECT_VERSION=${{ steps.v.outputs.n }} \
+            MARKETING_VERSION=1.${{ steps.v.outputs.n }} \
+            build 2>&1 | tee build.log | grep -E "error:|warning: .*(Swift|swift)|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Release-iphoneos/TGWSProxy.app
+
+      - name: Package IPA (ad-hoc signed with entitlements)
+        run: |
+          rm -rf Payload && mkdir Payload
+          cp -R build/Release-iphoneos/TGWSProxy.app Payload/
+          codesign -f -s - --entitlements Tunnel/Tunnel.entitlements Payload/TGWSProxy.app/PlugIns/Tunnel.appex
+          codesign -f -s - --entitlements App/App.entitlements Payload/TGWSProxy.app
+          codesign -d --entitlements - Payload/TGWSProxy.app/PlugIns/Tunnel.appex
+          zip -qry "TGWSProxy-${{ steps.v.outputs.n }}.ipa" Payload
+          ls -la *.ipa
+
+      - name: Release notes
+        run: |
+          python3 - <<'PY'
+          import re
+          n = "${{ steps.v.outputs.n }}"
+          text = open("../CHANGELOG-iOS.md", encoding="utf-8").read()
+          m = re.search(r"^## Сборка " + n + r"\b.*?$(.*?)(?=^## |\Z)", text, re.S | re.M)
+          body = m.group(1).strip() if m else "Сборка " + n
+          body += "\n\n**Установка:** поставь `TGWSProxy-" + n + ".ipa` через iloader или SideStore, как Playport. Подробнее — [ios/README.md](../../blob/main/ios/README.md)."
+          open("notes.md", "w", encoding="utf-8").write(body)
+          PY
+          cat notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          N=${{ steps.v.outputs.n }}
+          TAG="ios-build-$N"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" "TGWSProxy-$N.ipa" \
+            --title "TG WS Proxy iOS — сборка $N" \
+            --notes-file notes.md \
+            --target "$GITHUB_SHA"
+
+      # Logs go to a pre-release, readable without Actions access.
+      - name: Publish failure log
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          touch build.log
+          grep -E "error:" build.log | sort -u | head -200 > errors.txt || true; echo "(end)" >> errors.txt
+          tail -300 build.log > build-tail.log
+          gh release create "ios-failure-${{ steps.v.outputs.n }}-${{ github.run_id }}-${{ github.run_attempt }}" \
+            errors.txt build-tail.log \
+            --prerelease --title "Ошибка сборки ${{ steps.v.outputs.n }}" \
+            --notes "Лог неудачной сборки" --target "$GITHUB_SHA"
